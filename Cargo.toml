@@ -7,8 +7,8 @@ edition = "2024"
 members = ["."]
 
 [dependencies.smithay]
-git = "https://github.com/mecha-org/smithay"
-rev = "60aafc2b1a64395bd32ec93f41e6712a07544c34"
+# Spike: local smithay checkout on branch etna-spike (60aafc2b tree + etna renderer).
+path = "../smithay"
 default-features = false
 features = [
   "backend_winit",
@@ -24,9 +24,12 @@ features = [
 ]
 
 [dependencies.smithay-drm-extras]
-git = "https://github.com/mecha-org/smithay"
-rev = "60aafc2b1a64395bd32ec93f41e6712a07544c34"
+path = "../smithay/smithay-drm-extras"
 default-features = false
+
+[features]
+# Spike: composite on the etnaviv 2D core instead of GLES (udev only).
+etna = ["smithay/renderer_etna"]
 
 [dependencies]
 mxconfig = { git = "https://github.com/mecha-org/mxconfig", rev = "510a018ef9e0a174fecac7cedb5369231a494e30" }

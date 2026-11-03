@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use smithay::backend::drm::DrmNode;
 use smithay::backend::egl::{EGLDevice, EGLDisplay};
-use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::output::Output;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
@@ -13,7 +12,14 @@ use crate::render::Element;
 use crate::state::State;
 
 pub mod udev;
+#[cfg(not(feature = "etna"))]
 pub mod winit;
+
+/// The renderer every backend draws with: GLES, or (spike) the etnaviv 2D core.
+#[cfg(not(feature = "etna"))]
+pub type CompRenderer = smithay::backend::renderer::gles::GlesRenderer;
+#[cfg(feature = "etna")]
+pub type CompRenderer = smithay::backend::renderer::etna::EtnaRenderer;
 
 /// 2x only for clearly HiDPI panels: tall enough, real physical size, >192 DPI on both axes.
 pub fn guess_default_scale(output: &Output) -> f64 {
@@ -66,7 +72,7 @@ pub fn output_refresh(output: &Output) -> Option<Duration> {
 /// only the presentation path differs.
 pub trait Backend {
     /// The renderer used to import client buffers and draw frames.
-    fn renderer(&mut self) -> &mut GlesRenderer;
+    fn renderer(&mut self) -> &mut CompRenderer;
 
     /// The seat name advertised for this backend.
     fn seat_name(&self) -> String;

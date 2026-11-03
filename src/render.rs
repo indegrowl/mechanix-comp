@@ -1,9 +1,9 @@
+use crate::backend::CompRenderer;
 use smithay::backend::renderer::element::AsRenderElements;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
-use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::{ImportAll, ImportMem};
 use smithay::desktop::{PopupManager, Space, Window, WindowSurfaceType};
 use smithay::output::Output;
@@ -30,9 +30,9 @@ smithay::backend::renderer::element::render_elements! {
 }
 
 /// Concrete element type used by both backends: the compositor always renders
-/// with a `GlesRenderer`, and every element ultimately resolves to a
+/// with a `CompRenderer`, and every element ultimately resolves to a
 /// `WaylandSurfaceRenderElement`.
-pub type Element = OutputElements<GlesRenderer>;
+pub type Element = OutputElements<CompRenderer>;
 
 /// Build the full list of render elements for `output` plus the clear color,
 /// shared by every backend so the "what to draw" policy lives in one place.
@@ -43,7 +43,7 @@ pub type Element = OutputElements<GlesRenderer>;
 /// top of the stacking order, which comes from [`StackingOrder`] like hit-testing does.
 #[allow(clippy::too_many_arguments)]
 pub fn output_elements(
-    renderer: &mut GlesRenderer,
+    renderer: &mut CompRenderer,
     space: &Space<Window>,
     output: &Output,
     is_locked: bool,
@@ -107,7 +107,7 @@ pub fn output_elements(
 
 /// The render elements of `surface` and its subsurfaces at `loc`.
 fn surface_tree(
-    renderer: &mut GlesRenderer,
+    renderer: &mut CompRenderer,
     surface: &WlSurface,
     loc: Point<i32, Physical>,
     scale: f64,

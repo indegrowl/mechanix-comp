@@ -24,11 +24,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => parent_display_present(),
     };
 
+    #[cfg(not(feature = "etna"))]
     if use_winit {
-        backend::winit::run()
-    } else {
-        backend::udev::run()
+        return backend::winit::run();
     }
+    #[cfg(feature = "etna")]
+    if use_winit {
+        eprintln!("built with the etnaviv 2D renderer: udev only");
+    }
+    backend::udev::run()
 }
 
 /// Install a stderr subscriber only when `MECHANIX_COMP_LOG` is set.

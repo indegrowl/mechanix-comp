@@ -12,6 +12,7 @@ use smithay::backend::drm::output::{DrmOutput, DrmOutputManager, DrmOutputRender
 use smithay::backend::drm::{
     DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata, DrmEventTime, DrmNode, NodeType,
 };
+#[cfg(not(feature = "etna"))]
 use smithay::backend::egl::{EGLContext, EGLDevice, EGLDisplay};
 use smithay::backend::input::InputEvent;
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
@@ -24,6 +25,7 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
+#[cfg(not(feature = "etna"))]
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
@@ -52,7 +54,7 @@ use smithay::wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder};
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 use tracing::{error, info, warn};
 
-use crate::backend::{Backend, Wakeups, output_refresh};
+use crate::backend::{Backend, CompRenderer, Wakeups, output_refresh};
 use crate::drawing::{PointerElement, cached_pointer_buffer};
 use crate::handlers::image_copy_capture::{OutputFrame, capture_output};
 use crate::render::{Element, OutputElements, output_elements};
@@ -125,7 +127,7 @@ pub struct UdevData {
     login: LibSeatSession,
     loop_handle: LoopHandle<'static, State<UdevData>>,
     /// Shared GLES renderer, created on the first KMS card.
-    renderer: Option<GlesRenderer>,
+    renderer: Option<CompRenderer>,
     /// Card `renderer` was created on; its removal clears the renderer.
     renderer_node: Option<DrmNode>,
     devices: HashMap<DrmNode, DeviceData>,
@@ -156,7 +158,7 @@ struct RenderDmabuf {
 }
 
 impl Backend for UdevData {
-    fn renderer(&mut self) -> &mut GlesRenderer {
+    fn renderer(&mut self) -> &mut CompRenderer {
         self.renderer
             .as_mut()
             .expect("KMS renderer not initialized")
@@ -542,6 +544,86 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Formats the renderer can draw scanout buffers in.
+#[cfg(not(feature = "etna"))]
+fn render_formats(renderer: &CompRenderer) -> FormatSet {
+    renderer.egl_context().dmabuf_render_formats().clone()
+}
+
+#[cfg(feature = "etna")]
+fn render_formats(renderer: &CompRenderer) -> FormatSet {
+    renderer.render_formats()
+}
+
+/// GLES on the card's EGL device, plus the render node EGL opened (kmsro: not
+/// the display card). `None` skips this card so a later one can take over.
+#[cfg(not(feature = "etna"))]
+fn create_renderer(
+    node: DrmNode,
+    gbm: &GbmDevice<DrmDeviceFd>,
+) -> Option<(CompRenderer, Option<DrmNode>)> {
+    let egl_display = match unsafe { EGLDisplay::new(gbm.clone()) } {
+        Ok(display) => display,
+        Err(err) => {
+            warn!("Ignoring {node}: EGL init failed: {err}");
+            return None;
+        }
+    };
+    let egl_device = EGLDevice::device_for_display(&egl_display).ok();
+    if egl_device
+        .as_ref()
+        .is_some_and(|device| device.is_software())
+    {
+        warn!("Ignoring {node}: software EGL renderer");
+        return None;
+    }
+    let egl_context = match EGLContext::new(&egl_display) {
+        Ok(context) => context,
+        Err(err) => {
+            warn!("Ignoring {node}: EGL context failed: {err}");
+            return None;
+        }
+    };
+    let renderer = match unsafe { GlesRenderer::new(egl_context) } {
+        Ok(renderer) => renderer,
+        Err(err) => {
+            warn!("Ignoring {node}: renderer init failed: {err}");
+            return None;
+        }
+    };
+    let render_node = egl_device.and_then(|device| device.try_get_render_node().ok().flatten());
+    Some((renderer, render_node))
+}
+
+/// Spike: the etnaviv 2D core on `MECHA_ETNA_NODE` (default renderD128).
+#[cfg(feature = "etna")]
+fn create_renderer(
+    node: DrmNode,
+    _gbm: &GbmDevice<DrmDeviceFd>,
+) -> Option<(CompRenderer, Option<DrmNode>)> {
+    let path = std::env::var("MECHA_ETNA_NODE").unwrap_or_else(|_| "/dev/dri/renderD128".into());
+    let fd = match smithay::reexports::rustix::fs::open(
+        path.as_str(),
+        OFlags::RDWR | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(err) => {
+            warn!("Ignoring {node}: can't open {path}: {err}");
+            return None;
+        }
+    };
+    let renderer = match CompRenderer::new(fd) {
+        Ok(renderer) => renderer,
+        Err(err) => {
+            warn!("Ignoring {node}: etnaviv 2D renderer init failed: {err}");
+            return None;
+        }
+    };
+    info!("Rendering with the etnaviv 2D core on {path}");
+    Some((renderer, DrmNode::from_path(&path).ok()))
+}
+
 impl State<UdevData> {
     fn device_added(
         &mut self,
@@ -571,43 +653,16 @@ impl State<UdevData> {
         // Build the shared renderer on the first usable card. If EGL fails or is
         // software, skip this card so a later KMS card can take over.
         let render_formats = if let Some(renderer) = self.backend_data.renderer.as_mut() {
-            renderer.egl_context().dmabuf_render_formats().clone()
+            render_formats(renderer)
         } else {
-            let egl_display = match unsafe { EGLDisplay::new(gbm.clone()) } {
-                Ok(display) => display,
-                Err(err) => {
-                    warn!("Ignoring {node}: EGL init failed: {err}");
-                    return Ok(());
-                }
-            };
-            let egl_device = EGLDevice::device_for_display(&egl_display).ok();
-            if egl_device
-                .as_ref()
-                .is_some_and(|device| device.is_software())
-            {
-                warn!("Ignoring {node}: software EGL renderer");
+            let Some((renderer, render_node)) = create_renderer(node, &gbm) else {
                 return Ok(());
-            }
-            let egl_context = match EGLContext::new(&egl_display) {
-                Ok(context) => context,
-                Err(err) => {
-                    warn!("Ignoring {node}: EGL context failed: {err}");
-                    return Ok(());
-                }
             };
-            let render_formats = egl_context.dmabuf_render_formats().clone();
-            let renderer = match unsafe { GlesRenderer::new(egl_context) } {
-                Ok(renderer) => renderer,
-                Err(err) => {
-                    warn!("Ignoring {node}: renderer init failed: {err}");
-                    return Ok(());
-                }
-            };
+            let render_formats = render_formats(&renderer);
 
             if self.dmabuf_global.is_none() {
                 // Import on the render node EGL uses (kmsro: not the display card).
-                let import_node = egl_device
-                    .and_then(|device| device.try_get_render_node().ok().flatten())
+                let import_node = render_node
                     .or_else(|| node.node_with_type(NodeType::Render).and_then(|r| r.ok()))
                     .unwrap_or(node);
                 let dmabuf_formats = renderer.dmabuf_formats();
@@ -787,7 +842,7 @@ impl State<UdevData> {
         let drm_output = match device
             .drm_output_manager
             .lock()
-            .initialize_output::<GlesRenderer, Element>(
+            .initialize_output::<CompRenderer, Element>(
                 crtc,
                 drm_mode,
                 &[connector.handle()],
@@ -993,8 +1048,8 @@ impl State<UdevData> {
                         if icon.surface.alive() {
                             custom_elements.extend(
                                 render_elements_from_surface_tree::<
-                                    GlesRenderer,
-                                    WaylandSurfaceRenderElement<GlesRenderer>,
+                                    CompRenderer,
+                                    WaylandSurfaceRenderElement<CompRenderer>,
                                 >(
                                     renderer,
                                     &icon.surface,

@@ -171,6 +171,7 @@ impl CaptureSession {
         false
     }
 
+    #[cfg(not(feature = "etna"))]
     /// Track damage; fill the pending frame once there is unseen damage.
     fn update<B: Backend + 'static, E: RenderElement<GlesRenderer>>(
         &mut self,
@@ -289,8 +290,17 @@ impl<BackendData: Backend + 'static> ImageCopyCaptureHandler for State<BackendDa
             CaptureSource::Output(output) => output_size(&output.upgrade()?)?,
             CaptureSource::Toplevel(surface) => self.toplevel_target(surface)?.size,
         };
-        let dma = dmabuf_constraints(self.backend_data.renderer());
-        Some(constraints(size, dma))
+        // Spike: capture is GLES-only; the etnaviv 2D build offers none.
+        #[cfg(feature = "etna")]
+        {
+            let _ = size;
+            return None;
+        }
+        #[cfg(not(feature = "etna"))]
+        {
+            let dma = dmabuf_constraints(self.backend_data.renderer());
+            Some(constraints(size, dma))
+        }
     }
 
     fn new_session(&mut self, session: Session) {
@@ -344,6 +354,10 @@ impl<BackendData: Backend + 'static> ImageCopyCaptureHandler for State<BackendDa
 
 impl<BackendData: Backend + 'static> State<BackendData> {
     /// Re-send buffer constraints after an output's mode changed.
+    #[cfg(feature = "etna")]
+    pub fn update_capture_constraints(&mut self, _output: &Output) {}
+
+    #[cfg(not(feature = "etna"))]
     pub fn update_capture_constraints(&mut self, output: &Output) {
         let Some(size) = output_size(output) else {
             return;
@@ -520,6 +534,10 @@ impl<BackendData: Backend + 'static> State<BackendData> {
     }
 
     /// Track a toplevel session's damage; draw the window into its buffer.
+    #[cfg(feature = "etna")]
+    fn capture_toplevel(&mut self, _index: usize) {}
+
+    #[cfg(not(feature = "etna"))]
     fn capture_toplevel(&mut self, index: usize) {
         let CaptureSource::Toplevel(surface) = &self.capture_sessions[index].source else {
             return;
@@ -587,7 +605,18 @@ pub struct OutputFrame<'a, 'f> {
     pub presented: Duration,
 }
 
+/// Spike: no output capture on the etnaviv 2D build.
+#[cfg(feature = "etna")]
+pub fn capture_output<B: Backend + 'static>(
+    _sessions: &mut [CaptureSession],
+    _renderer: &mut crate::backend::CompRenderer,
+    _loop_handle: &LoopHandle<'static, State<B>>,
+    _frame: OutputFrame<'_, '_>,
+) {
+}
+
 /// Track damage for the output's sessions; fill frames that have some.
+#[cfg(not(feature = "etna"))]
 pub fn capture_output<B: Backend + 'static>(
     sessions: &mut [CaptureSession],
     renderer: &mut GlesRenderer,
